@@ -1,0 +1,15 @@
+node_modules/
+dist/
+android/
+ios/
+.DS_Store
+*.log
+.npm/
+.vite/
+.env
+.env.*
+*.apk
+*.aab
+.idea/
+.gradle/
+local.properties
