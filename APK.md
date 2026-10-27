@@ -1,49 +1,29 @@
-# ساخت APK انبارین
+# ساخت APK
 
-## روش ۱ — GitHub Actions (پیشنهادی)
+## GitHub Actions
 
-1. این پروژه را روی GitHub پوش کن.
-2. برو به تب **Actions**.
-3. workflow به نام **Build Android APK** را اجرا کن (Run workflow).
-4. بعد از اتمام، از بخش **Artifacts** فایل `anbarin-debug-apk` را دانلود کن.
+1. فایل‌های این پروژه را push کن (حتماً شامل `.github/workflows/main.yml`).
+2. برو **Actions** → workflow **Build Anbarin APK**.
+3. اگر خودکار اجرا نشد: **Run workflow**.
+4. بعد از موفقیت، **Artifacts** → `anbarin-debug-apk` را دانلود کن.
 
-APK دیباگ بدون امضای فروشگاهی است؛ برای نصب روی گوشی کافی است (Install from unknown sources).
+## اگر fail شد
 
-## روش ۲ — روی سیستم خودت
+- در Actions روی run قرمز کلیک کن و **لاگ مرحله قرمز** را باز کن.
+- خطاهای رایج:
+  - `npm install` → registry / network
+  - `tsc` → خطای TypeScript
+  - `cap add android` → Capacitor در package.json نباشد
+  - `gradlew` → SDK / license
 
-### پیش‌نیاز
-- Node.js 20
-- Android Studio + SDK
-- JDK 17
-
-### دستورات
+## محلی
 
 ```bash
 npm install
 npm run build
 npx cap add android
 npx cap sync android
-npx cap open android
+cd android && ./gradlew assembleDebug
 ```
 
-در Android Studio: **Build → Build Bundle(s) / APK(s) → Build APK(s)**
-
-یا از خط فرمان:
-
-```bash
-cd android
-./gradlew assembleDebug
-```
-
-خروجی:
-
-`android/app/build/outputs/apk/debug/app-debug.apk`
-
-### امضای Release (اختیاری)
-
-در Android Studio یک keystore بساز و `assembleRelease` بزن.
-
-## شناسه اپ
-
-- applicationId: `ir.azar.anbar`
-- نام: انبارین
+APK: `android/app/build/outputs/apk/debug/app-debug.apk`
