@@ -10,7 +10,8 @@
 import type { Product } from '@/types';
 import { products, settings, logAudit, save, rebuildIndex, invalidateStats } from './state';
 import { toast } from './ui';
-import { downloadFile, dateStr, generateId } from '@/utils/helpers';
+import { setLocationFilter, collectLocations } from './filters-roles';
+import { downloadFile, dateStr, generateId, normalizeDigits } from '@/utils/helpers';
 
 declare global {
   interface Window {
@@ -225,7 +226,7 @@ export function exportCSV(onlyDiff = false): void {
   }
   const data = list.map(productToExportRow);
   downloadFile(rowsToCSV(data), `anbar-${onlyDiff ? 'diff-' : ''}${dateStr()}.csv`, 'text/csv;charset=utf-8');
-  toast('CSV دانلود شد', 'success');
+  toast('در حال آماده‌سازی ذخیره فایل CSV', 'success');
   logAudit('export_csv', { count: list.length, onlyDiff });
 }
 
@@ -245,7 +246,7 @@ export function exportJSON(): void {
     `anbar-backup-${dateStr()}.json`,
     'application/json'
   );
-  toast('پشتیبان JSON ذخیره شد', 'success');
+  toast('پنجره انتخاب محل ذخیره پشتیبان باز می‌شود', 'success');
   logAudit('export_json', { count: products.length });
 }
 
@@ -322,10 +323,84 @@ function productToExportRow(p: Product): Record<string, unknown> {
   };
 }
 
-function matrixToImportRows(matrix: unknown[][]): ImportRow[] {
+const IMPORT_FIELD_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: '', label: 'نادیده بگیر' },
+  { value: 'name', label: 'نام کالا' },
+  { value: 'code', label: 'بارکد' },
+  { value: 'sku', label: 'کد کالا' },
+  { value: 'qty', label: 'موجودی سیستم' },
+  { value: 'counted', label: 'تعداد شمارش‌شده' },
+  { value: 'unit', label: 'واحد' },
+  { value: 'price', label: 'قیمت' },
+  { value: 'location', label: 'محل / قفسه' },
+  { value: 'warehouse', label: 'انبار' },
+  { value: 'note', label: 'یادداشت' },
+  { value: 'serial', label: 'سریال' },
+  { value: 'batch', label: 'سری ساخت' },
+  { value: 'expiry', label: 'تاریخ انقضا' },
+  { value: 'minQty', label: 'حداقل موجودی' },
+  { value: 'maxQty', label: 'حداکثر موجودی' },
+  { value: 'unitFactor', label: 'ضریب واحد' },
+];
+
+function chooseColumnMapping(headers: string[]): Promise<Record<number, string> | null> {
+  return new Promise((resolve) => {
+    const previous = document.getElementById('importColumnMapping');
+    previous?.remove();
+    const detected = mapHeaders(headers);
+    const overlay = document.createElement('div');
+    overlay.id = 'importColumnMapping';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:#0009;display:flex;align-items:center;justify-content:center;padding:14px;';
+    const card = document.createElement('div');
+    card.dir = 'rtl';
+    card.style.cssText = 'width:min(620px,100%);max-height:85vh;overflow:auto;background:var(--card,#fff);color:var(--text,#222);border-radius:16px;padding:18px;box-shadow:0 12px 40px #0004;';
+    const title = document.createElement('h3'); title.textContent = 'تشخیص و انتخاب ستون‌های اکسل';
+    title.style.cssText = 'margin-bottom:6px;font-size:1.1rem;';
+    const intro = document.createElement('p'); intro.textContent = 'ستون‌ها به‌صورت خودکار تشخیص داده شده‌اند. در صورت نیاز، نوع هر ستون را تغییر دهید.';
+    intro.style.cssText = 'font-size:.9rem;color:var(--text-soft,#666);margin-bottom:12px;';
+    const form = document.createElement('div'); form.style.cssText = 'display:grid;gap:9px;';
+    const selects: HTMLSelectElement[] = [];
+    headers.forEach((header, i) => {
+      const row = document.createElement('label');
+      row.style.cssText = 'display:grid;grid-template-columns:minmax(0,1fr) minmax(130px,.9fr);gap:10px;align-items:center;padding:8px;border:1px solid var(--border,#ddd);border-radius:10px;';
+      const name = document.createElement('span'); name.textContent = `${header.trim() || `ستون ${i + 1}`} (${i + 1})`; name.style.cssText = 'overflow-wrap:anywhere;font-size:.9rem;';
+      const select = document.createElement('select'); select.style.cssText = 'width:100%;min-width:0;padding:8px;border-radius:8px;border:1px solid var(--border,#ccc);background:var(--bg,#fff);color:var(--text,#222);';
+      IMPORT_FIELD_OPTIONS.forEach((opt) => { const option = document.createElement('option'); option.value = opt.value; option.textContent = opt.label; select.appendChild(option); });
+      const guessed = detected[i] || '';
+      select.value = guessed;
+      selects.push(select); row.append(name, select); form.appendChild(row);
+    });
+    const actions = document.createElement('div'); actions.style.cssText = 'display:flex;gap:10px;margin-top:16px;';
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'انصراف';
+    cancel.style.cssText = 'flex:1;padding:11px;border:1px solid var(--border,#ccc);border-radius:10px;background:transparent;color:inherit;font:inherit;';
+    const apply = document.createElement('button'); apply.type = 'button'; apply.textContent = 'ادامه وارد کردن';
+    apply.style.cssText = 'flex:1;padding:11px;border:0;border-radius:10px;background:#0d9488;color:white;font-weight:700;font:inherit;';
+    actions.append(cancel, apply); card.append(title, intro, form, actions); overlay.appendChild(card); document.body.appendChild(overlay);
+    const finish = (value: Record<number, string> | null) => { overlay.remove(); resolve(value); };
+    cancel.onclick = () => finish(null);
+    overlay.addEventListener('click', (ev) => { if (ev.target === overlay) finish(null); });
+    apply.onclick = () => {
+      const mapping: Record<number, string> = {};
+      selects.forEach((select, i) => { if (select.value) mapping[i] = select.value; });
+      if (!Object.values(mapping).some((v) => ['name', 'code', 'sku'].includes(v))) {
+        toast('حداقل ستون نام کالا، بارکد یا کد کالا را انتخاب کنید', 'error'); return;
+      }
+      finish(mapping);
+    };
+  });
+}
+
+async function matrixToMappedImportRows(matrix: unknown[][]): Promise<ImportRow[] | null> {
   if (!matrix.length) return [];
   const headers = matrix[0].map((h) => String(h ?? ''));
-  const colMap = mapHeaders(headers);
+  const mapping = await chooseColumnMapping(headers);
+  return mapping ? matrixToImportRows(matrix, mapping) : null;
+}
+
+function matrixToImportRows(matrix: unknown[][], suppliedMap?: Record<number, string>): ImportRow[] {
+  if (!matrix.length) return [];
+  const headers = matrix[0].map((h) => String(h ?? ''));
+  const colMap = suppliedMap || mapHeaders(headers);
   const rows: ImportRow[] = [];
 
   for (let r = 1; r < matrix.length; r++) {
@@ -350,7 +425,7 @@ function matrixToImportRows(matrix: unknown[][]): ImportRow[] {
       } else {
         const s = String(raw ?? '').trim();
         if (s) {
-          (row as any)[field] = s;
+          (row as any)[field] = field === 'code' || field === 'sku' ? normalizeDigits(s) : s;
           if (field === 'name' || field === 'code' || field === 'sku') hasNameOrCode = true;
         }
       }
@@ -366,9 +441,7 @@ function matrixToImportRows(matrix: unknown[][]): ImportRow[] {
 }
 
 function importIdentity(row: ImportRow): string {
-  const code = String(row.code || '')
-    .trim()
-    .toLowerCase();
+  const code = normalizeDigits(row.code || '').toLowerCase();
   const sku = String(row.sku || '')
     .trim()
     .toLowerCase();
@@ -384,8 +457,8 @@ export function applyImportRows(rows: ImportRow[], mode: ImportMode): ImportResu
   // index existing
   const byKey = new Map<string, number>();
   products.forEach((p, i) => {
-    if (p.code) byKey.set(`b:${String(p.code).trim().toLowerCase()}`, i);
-    if (p.sku) byKey.set(`s:${String(p.sku).trim().toLowerCase()}`, i);
+    if (p.code) byKey.set(`b:${normalizeDigits(p.code).toLowerCase()}`, i);
+    if (p.sku) byKey.set(`s:${normalizeDigits(p.sku).toLowerCase()}`, i);
   });
 
   let added = 0;
@@ -403,7 +476,7 @@ export function applyImportRows(rows: ImportRow[], mode: ImportMode): ImportResu
     if (existingIdx !== undefined && mode === 'merge') {
       const p = products[existingIdx];
       if (row.name) p.name = row.name;
-      if (row.code) p.code = row.code;
+      if (row.code) p.code = normalizeDigits(row.code);
       if (row.sku) p.sku = row.sku;
       if (row.unit) p.unit = row.unit;
       if (row.systemQty !== undefined) p.systemQty = row.systemQty;
@@ -419,7 +492,7 @@ export function applyImportRows(rows: ImportRow[], mode: ImportMode): ImportResu
       const p: Product = {
         id: generateId('p'),
         name: row.name || 'بدون‌نام',
-        code: row.code || row.sku || '',
+        code: normalizeDigits(row.code || row.sku || ''),
         sku: row.sku || '',
         unit: row.unit || 'عدد',
         unitFactor: row.unitFactor || 1,
@@ -438,8 +511,8 @@ export function applyImportRows(rows: ImportRow[], mode: ImportMode): ImportResu
       };
       products.push(p);
       const i = products.length - 1;
-      if (p.code) byKey.set(`b:${String(p.code).trim().toLowerCase()}`, i);
-      if (p.sku) byKey.set(`s:${String(p.sku).trim().toLowerCase()}`, i);
+      if (p.code) byKey.set(`b:${normalizeDigits(p.code).trim().toLowerCase()}`, i);
+      if (p.sku) byKey.set(`s:${normalizeDigits(p.sku).trim().toLowerCase()}`, i);
       added++;
     }
   }
@@ -454,6 +527,11 @@ export function applyImportRows(rows: ImportRow[], mode: ImportMode): ImportResu
       : `ورود: ${added} جدید، ${updated} به‌روز` + (skipped ? `، ${skipped} رد` : ''),
     'success'
   );
+  try {
+    suggestLocationAfterImport(rows);
+  } catch (e) {
+    console.warn('suggestLocationAfterImport', e);
+  }
   return { added, updated, skipped, total: rows.length };
 }
 
@@ -488,7 +566,8 @@ export async function processImportFile(
   if (/\.(csv|txt)$/i.test(fname)) {
     const text = await file.text();
     const matrix = parseCSVText(text);
-    const rows = matrixToImportRows(matrix);
+    const rows = await matrixToMappedImportRows(matrix);
+    if (rows === null) return null;
     if (!rows.length) {
       toast('ردیف معتبری در CSV پیدا نشد', 'error');
       return null;
@@ -524,7 +603,8 @@ async function processExcelFile(
         defval: '',
         raw: false,
       });
-      const rows = matrixToImportRows(matrix);
+      const rows = await matrixToMappedImportRows(matrix);
+      if (rows === null) return null;
       if (!rows.length) {
         toast('ردیف معتبری پیدا نشد', 'error');
         return null;
@@ -765,8 +845,17 @@ export function exportExcel(onlyDiff = false): void {
       const ws = window.XLSX.utils.json_to_sheet(data);
       const wb = window.XLSX.utils.book_new();
       window.XLSX.utils.book_append_sheet(wb, ws, onlyDiff ? 'مغایرت‌ها' : 'انبارگردانی');
-      window.XLSX.writeFile(wb, filename);
-      toast('اکسل ذخیره شد', 'success');
+      // در اندروید از همان پنجره «ذخیره در» استفاده کن تا کاربر محل را انتخاب کند.
+      // XLSX.writeFile مستقیماً دانلود می‌کند و انتخاب محل ذخیره را دور می‌زند.
+      const workbookBytes = window.XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      downloadFile(
+        new Blob([workbookBytes], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }),
+        filename,
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      );
+      toast('پنجره انتخاب محل ذخیره فایل باز می‌شود', 'success');
       logAudit('export_xlsx', { count: list.length, onlyDiff, engine: 'sheetjs' });
       return;
     } catch (err) {
@@ -785,7 +874,7 @@ export function exportExcel(onlyDiff = false): void {
       }),
       filename
     );
-    toast('اکسل (آفلاین) ذخیره شد', 'success');
+    toast('پنجره انتخاب محل ذخیره فایل اکسل باز می‌شود', 'success');
     logAudit('export_xlsx', { count: list.length, onlyDiff, engine: 'offline' });
   } catch (err) {
     console.error(err);
@@ -807,3 +896,49 @@ export function loadSheetJS(): Promise<boolean> {
     document.head.appendChild(s);
   });
 }
+
+/** بعد از ورود فایل: پیشنهاد تنظیم فیلتر روی محل‌های واردشده */
+export function suggestLocationAfterImport(rows: ImportRow[]): void {
+  const locs = Array.from(
+    new Set(
+      rows
+        .map((r) => (r.location || '').trim())
+        .filter(Boolean)
+    )
+  );
+  if (!locs.length) return;
+
+  if (locs.length === 1) {
+    const loc = locs[0];
+    if (confirm(`محل «${loc}» در فایل وجود دارد.\nفیلتر لیست روی همین محل گذاشته شود؟`)) {
+      setLocationFilter(loc);
+      const a = document.getElementById('locationFilterSelect') as HTMLSelectElement | null;
+      const b = document.getElementById('locationFilterSelectProducts') as HTMLSelectElement | null;
+      if (a) {
+        if (![...a.options].some((o) => o.value === loc)) {
+          const opt = document.createElement('option');
+          opt.value = loc;
+          opt.textContent = loc;
+          a.appendChild(opt);
+        }
+        a.value = loc;
+      }
+      if (b) {
+        if (![...b.options].some((o) => o.value === loc)) {
+          const opt = document.createElement('option');
+          opt.value = loc;
+          opt.textContent = loc;
+          b.appendChild(opt);
+        }
+        b.value = loc;
+      }
+      toast('فیلتر محل: ' + loc, 'success');
+    }
+    return;
+  }
+
+  // چند محل
+  const preview = locs.slice(0, 5).join('، ') + (locs.length > 5 ? '…' : '');
+  toast(`فایل شامل ${locs.length} محل است: ${preview}`, 'info');
+}
+

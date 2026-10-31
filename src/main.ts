@@ -13,6 +13,16 @@ import {
   session,
 } from './modules/state';
 import { toast, showPage, loadTheme } from './modules/ui';
+import { findProductByCode } from './modules/state';
+
+// پیام نهایی ذخیره‌سازی فایل در اپ اندروید (پس از انتخاب پوشه و نوشتن موفق).
+window.addEventListener('anbarin:file-saved', (event: Event) => {
+  const detail = (event as CustomEvent<{ filename?: string }>).detail;
+  toast(`گزارش با موفقیت ذخیره شد: ${detail?.filename || 'فایل'}`, 'success');
+});
+window.addEventListener('anbarin:file-save-error', () => {
+  toast('ذخیره گزارش ناموفق بود؛ دوباره تلاش کنید.', 'error');
+});
 import { formatFaNumber } from './utils/helpers';
 import {
   initScanner,
@@ -61,6 +71,7 @@ import {
   exportDoubleCountMismatches,
   exportStockAlerts,
   exportDiffsExcel,
+  initAccountingTemplateUI,
 } from './modules/reports';
 import {
   captureProductPhoto,
@@ -78,6 +89,11 @@ import {
   joinTeamSession,
   exportTeamConflictReport,
   refreshTeamSyncUI,
+  saveTeamOnlineConfig,
+  saveTeamSyncMode,
+  syncTeamOnlineNow,
+  refreshTeamOnlineStatus,
+  initializeTeamOnlineSync,
 } from './modules/team-sync';
 import {
   openProductModal,
@@ -248,6 +264,7 @@ async function bootApp() {
     updateCapsInfo();
     updateUndoBtn();
     fillSettingsForm();
+    updateRolePreview();
     refreshLists();
     loadSheetJS().then((ok) => console.log('[Anbarin] SheetJS:', ok));
 
@@ -280,7 +297,10 @@ function initScannerModule() {
         onNotFound: (code) => offerAddProduct(code),
       });
       const info = document.getElementById('lastScanInfo');
-      if (info) info.textContent = `[${result.source}] ${result.code}`;
+      if (info) {
+        const product = findProductByCode(result.code);
+        info.textContent = product ? `کالای انتخاب‌شده: ${product.name}` : `کالایی با بارکد ${result.code} پیدا نشد`;
+      }
     },
     onFieldFill: (fieldId, code) => {
       const el = document.getElementById(fieldId) as HTMLInputElement | null;
@@ -297,9 +317,10 @@ function renderShell() {
     <header>
       <div class="header-top">
         <div class="logo-area">
-          <strong>انبارین</strong>
-          <span class="version">v1.4.0</span>
-          <span class="role-badge" id="roleBadge">—</span>
+          <img class="brand-logo" src="./logo.png" alt="لوگوی انبارین" />
+          <div class="brand-title"><strong>انبارین</strong>
+          <span class="version">v1.4.1</span>
+          <span class="role-badge" id="roleBadge">—</span></div>
         </div>
         <div class="header-stats" id="headerStats"></div>
       </div>
@@ -378,6 +399,19 @@ function renderShell() {
             <button class="btn btn-secondary btn-block" id="btnAccGeneric">📒 سند اصلاح (عمومی)</button>
             <button class="btn btn-secondary btn-block" id="btnAccHeloo">📒 قالب هلو</button>
             <button class="btn btn-secondary btn-block" id="btnAccSepidar">📒 قالب سپیدار</button>
+            <details class="card" style="margin-top:10px;padding:12px">
+              <summary style="cursor:pointer;font-weight:700">⚙️ تنظیم ستون‌های خروجی اکسل هلو و سپیدار</summary>
+              <p class="hint" style="margin:8px 0">قالب هر نرم‌افزار جداگانه ذخیره می‌شود. خروجی شامل کالاهای شمارش‌شده است و ستون «موجودی شمارش‌شده» مقدار نهایی شمارش را نشان می‌دهد.</p>
+              <label for="accountingTemplateTarget">قالب مقصد</label>
+              <select id="accountingTemplateTarget" class="search-input" style="margin:6px 0 10px;width:100%">
+                <option value="heloo">هلو</option><option value="sepidar">سپیدار</option>
+              </select>
+              <div id="accountingTemplateFields" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:2px"></div>
+              <div class="actions" style="margin-top:10px">
+                <button class="btn btn-secondary btn-block" id="btnSaveAccountingTemplate" type="button">💾 ذخیره قالب انتخابی</button>
+                <button class="btn btn-primary btn-block" id="btnExportAccountingTemplate" type="button">📊 خروجی اکسل با ستون‌های انتخابی</button>
+              </div>
+            </details>
             <button class="btn btn-secondary btn-block" id="btnDoubleDiff">📥 اختلاف فاز ۱ و ۲</button>
             <button class="btn btn-secondary btn-block" id="btnStockAlerts">⚠️ هشدار موجودی</button>
             <button class="btn btn-secondary btn-block" id="btnPrintLabels">🏷️ چاپ لیبل بارکد (تا ۵۰)</button>
@@ -394,8 +428,8 @@ function renderShell() {
           <input type="search" id="auditSearch" placeholder="جستجو در لاگ..." class="search-input" style="margin-top:10px" />
           <div id="auditList" style="margin-top:10px"></div>
           <div class="actions" style="margin-top:12px">
-            <button class="btn btn-secondary btn-block" id="btnExportAudit">📄 دانلود CSV لاگ</button>
-            <button class="btn btn-secondary btn-block" id="btnClearAudit">🗑 پاک کردن لاگ</button>
+            <button class="btn btn-audit-export btn-block" id="btnExportAudit" type="button">📄 دانلود CSV لاگ</button>
+            <button class="btn btn-audit-clear btn-block" id="btnClearAudit" type="button">🗑 پاک کردن لاگ</button>
           </div>
         </div>
       </section>
@@ -422,13 +456,26 @@ function renderShell() {
             <label class="set-row"><span>شمارش کور (بدون نمایش مغایرت)</span><input type="checkbox" id="setBlind" /></label>
             <label class="set-row"><span>اسکنر USB/Bluetooth</span><input type="checkbox" id="setBt" /></label>
             <label class="set-row"><span>شمارش دوفازی</span><input type="checkbox" id="setDouble" /></label>
-            <label class="set-row"><span>نقش</span>
-              <select id="setRole">
-                <option value="admin">مدیر</option>
-                <option value="counter">شمارنده</option>
-                <option value="viewer">مشاهده‌گر</option>
-              </select>
-            </label>
+            <div class="role-settings-panel" id="roleSettingsPanel">
+              <div class="role-settings-heading">
+                <div>
+                  <strong>نقش و سطح دسترسی</strong>
+                  <p>نقش را انتخاب کنید؛ دسترسی‌ها پس از ذخیره دوباره اعمال و بررسی می‌شوند.</p>
+                </div>
+                <span class="role-current-pill" id="rolePreviewPill">مدیر</span>
+              </div>
+              <label class="set-row" for="setRole"><span>نقش کاربر</span>
+                <select id="setRole" aria-describedby="rolePreviewDescription">
+                  <option value="admin">مدیر</option>
+                  <option value="counter">شمارنده</option>
+                  <option value="viewer">مشاهده‌گر</option>
+                </select>
+              </label>
+              <p class="role-preview-description" id="rolePreviewDescription" aria-live="polite">دسترسی کامل به تنظیمات و عملیات مدیریتی.</p>
+              <div class="role-permission-list" id="rolePermissionList" aria-live="polite">
+                <span>✓ مدیریت تنظیمات و مجوزها</span><span>✓ شمارش و ویرایش کالا</span><span>✓ ورود و خروج اطلاعات</span>
+              </div>
+            </div>
             <label class="set-row"><span>انبار فعال</span><input type="text" id="setWarehouse" /></label>
             <label class="set-row"><span>نام اپراتور</span><input type="text" id="setOperator" placeholder="نام شما" /></label>
           </div>
@@ -477,6 +524,24 @@ function renderShell() {
               <option value="local">مقدار محلی</option>
             </select>
           </label>
+          <div class="card" style="margin-top:12px;padding:12px;background:var(--bg)">
+            <h3 style="margin:0 0 8px">انتخاب روش همگام‌سازی تیمی</h3>
+            <label class="field" style="display:block;margin-top:8px"><span>روش کار</span>
+              <select id="teamSyncMode" style="width:100%">
+                <option value="offline">آفلاین — انتقال با فایل JSON</option>
+                <option value="live">آنلاین زنده — همگام‌سازی خودکار</option>
+                <option value="hybrid">ترکیبی — آنلاین خودکار + ابزار آفلاین</option>
+              </select>
+            </label>
+            <p class="hint">حالت آنلاین زنده در این نسخه با بررسی خودکار دوره‌ای Firebase کار می‌کند، نه WebSocket/Supabase. در حالت ترکیبی، فایل‌های JSON هم برای انتقال دستی در دسترس می‌مانند. در قطع اینترنت، شمارش محلی حفظ می‌شود.</p>
+            <label class="field" style="display:block;margin-top:8px"><span>نشانی پایگاه داده آنلاین</span><input id="teamOnlineUrl" type="url" placeholder="https://your-project-default-rtdb.firebaseio.com" style="width:100%;direction:ltr;text-align:left" /></label>
+            <label class="field" style="display:block;margin-top:8px"><span>توکن دسترسی (در صورت نیاز)</span><input id="teamOnlineToken" type="password" placeholder="اختیاری؛ مطابق تنظیمات پایگاه داده" style="width:100%;direction:ltr;text-align:left" autocomplete="off" /></label>
+            <div class="actions" style="margin-top:8px">
+              <button class="btn btn-secondary btn-block" id="btnSaveTeamOnline">ذخیره تنظیمات آنلاین</button>
+              <button class="btn btn-primary btn-block" id="btnSyncTeamOnline">همگام‌سازی آنلاین اکنون</button>
+            </div>
+            <p class="hint" id="teamOnlineStatus" role="status" aria-live="polite">همگام‌سازی آنلاین تنظیم نشده است.</p>
+          </div>
           <div class="actions" style="margin-top:12px">
             <button class="btn btn-primary btn-block" id="btnExportTeam">📤 ارسال بسته همگام‌سازی</button>
             <button class="btn btn-secondary btn-block" id="btnImportTeam">📥 دریافت و ادغام بسته</button>
@@ -493,7 +558,7 @@ function renderShell() {
             <button class="btn btn-primary btn-block" id="btnImport">📥 ورود از فایل</button>
             <input type="file" id="importFile" accept=".xlsx,.xls,.csv,.txt,.json" style="display:none" />
             <button class="btn btn-success btn-block" id="btnExportExcel">📥 دانلود اکسل کامل</button>
-            <button class="btn btn-secondary btn-block" id="btnExportDiff">📥 دانلود فقط مغایرت‌ها</button>
+            <button class="btn btn-primary btn-block" id="btnExportDiff">📥 دانلود فقط مغایرت‌ها</button>
             <button class="btn btn-secondary btn-block" id="btnExportCsv">📄 دانلود CSV</button>
             <button class="btn btn-secondary btn-block" id="btnExportJson">💾 پشتیبان JSON</button>
             <button class="btn btn-secondary btn-block" id="btnExportPhotos">🖼 خروجی بسته عکس‌ها</button>
@@ -533,10 +598,10 @@ function renderShell() {
       <div class="modal-card">
         <div id="qtyModalName" style="font-size:1.15rem;font-weight:800;color:var(--primary-deeper)"></div>
         <div id="qtyModalMeta" class="hint" style="margin-top:4px"></div>
-        <div style="display:flex;align-items:center;gap:8px;margin-top:16px">
-          <button class="btn btn-secondary" id="qtyMinus" style="min-width:48px;font-size:1.3rem">−</button>
+        <div class="qty-controls">
+          <button class="btn btn-secondary qty-step" id="qtyMinus" aria-label="کم کردن تعداد">−</button>
           <input type="number" id="qtyModalInput" min="0" step="any" inputmode="decimal" class="qty-input" />
-          <button class="btn btn-secondary" id="qtyPlus" style="min-width:48px;font-size:1.3rem">＋</button>
+          <button class="btn btn-secondary qty-step" id="qtyPlus" aria-label="زیاد کردن تعداد">+</button>
         </div>
         <div id="qtyModalDiff" style="text-align:center;font-size:.85rem;margin:10px 0;min-height:22px"></div>
         <div style="display:flex;gap:8px;margin-bottom:10px">
@@ -565,6 +630,124 @@ function renderShell() {
 }
 
 function bindEvents() {
+  // Session controls: ensure both visible buttons are wired to their actions.
+  // Refresh dependent UI only after the action returns; preserve existing state/data.
+  document.getElementById('btnStartSession')?.addEventListener('click', () => {
+    if (!guardWrite('شروع جلسه جدید')) return;
+    try {
+      actionStartSession();
+      updateHeader();
+      refreshLists();
+      updateUndoBtn();
+      refreshTeamSyncUI();
+    } catch (err) {
+      console.error('[Anbarin] start session failed:', err);
+      toast('شروع جلسه جدید انجام نشد؛ اطلاعات ذخیره‌سازی را بررسی کنید', 'error');
+    }
+  });
+  document.getElementById('btnCloseSession')?.addEventListener('click', () => {
+    if (!guardWrite('بستن جلسه')) return;
+    try {
+      actionCloseSession();
+      updateHeader();
+      refreshLists();
+      updateUndoBtn();
+      refreshTeamSyncUI();
+    } catch (err) {
+      console.error('[Anbarin] close session failed:', err);
+      toast('بستن جلسه انجام نشد؛ دوباره تلاش کنید', 'error');
+    }
+  });
+  document.getElementById('setRole')?.addEventListener('change', () => {
+    // پیش‌نمایش فقط نمایشی است؛ سطح دسترسی واقعی پس از ذخیره از تنظیمات معتبر خوانده می‌شود.
+    updateRolePreview();
+  });
+  document.getElementById('btnSaveSettings')?.addEventListener('click', () => {
+    try {
+      applySettingsFromForm();
+      // هم نشان نقش و هم محدودیت‌های UI را بلافاصله با نقش جدید هماهنگ کن.
+      updateHeader();
+      fillSettingsForm();
+      updateRolePreview();
+      refreshLists();
+    } catch (err) {
+      console.error('[Anbarin] saving settings failed:', err);
+      toast('ذخیره تنظیمات انجام نشد؛ فضای ذخیره‌سازی را بررسی کنید', 'error');
+    }
+  });
+  // دکمه‌های عملیات شمارش باید به توابع واقعی متصل باشند؛ قبلاً فقط در رابط نمایش داده می‌شدند.
+  document.getElementById('btnClearCounts')?.addEventListener('click', () => {
+    if (!guardWrite('پاک کردن شمارش‌ها')) return;
+    actionClearCounts();
+    updateHeader();
+    refreshLists();
+  });
+  document.getElementById('btnZeroUncounted')?.addEventListener('click', () => {
+    if (!guardWrite('صفر کردن شمارش‌نشده‌ها')) return;
+    actionZeroUncounted();
+    updateHeader();
+    refreshLists();
+  });
+
+  // عملیات همگام‌سازی شمارش با موجودی سیستم؛ این دکمه‌ها قبلاً تابع داشتند
+  // اما رویداد کلیک به آن‌ها متصل نشده بود.
+  document.getElementById('btnApplySystem')?.addEventListener('click', () => {
+    if (!guardWrite('اعمال شمارش روی موجودی سیستم')) return;
+    try {
+      if (applyCountsToSystem()) {
+        updateHeader();
+        refreshLists();
+        updateUndoBtn();
+      }
+    } catch (err) {
+      console.error('[Anbarin] apply counts to system failed:', err);
+      toast('اعمال شمارش روی موجودی سیستم ناموفق بود؛ دوباره تلاش کنید', 'error');
+    }
+  });
+  document.getElementById('btnResetToSystem')?.addEventListener('click', () => {
+    if (!guardWrite('برگرداندن شمارش به مقدار سیستم')) return;
+    try {
+      if (resetCountsToSystem()) {
+        updateHeader();
+        refreshLists();
+        updateUndoBtn();
+      }
+    } catch (err) {
+      console.error('[Anbarin] reset counts to system failed:', err);
+      toast('همسان‌سازی شمارش با موجودی سیستم ناموفق بود؛ دوباره تلاش کنید', 'error');
+    }
+  });
+
+  // چاپ لیبل بارکد؛ دکمه قبلاً در رابط بود اما رویداد کلیک نداشت.
+  document.getElementById('btnPrintLabels')?.addEventListener('click', () => {
+    try {
+      printLabelsBulk(50);
+    } catch (err) {
+      console.error('[Anbarin] print barcode labels failed:', err);
+      toast('چاپ لیبل انجام نشد؛ مرورگر یا مجوز چاپ را بررسی کنید', 'error');
+    }
+  });
+
+  // لاگ عملیات: دکمه‌ها قبلاً در صفحه وجود داشتند اما رویداد کلیک نداشتند.
+  document.getElementById('btnExportAudit')?.addEventListener('click', () => {
+    try {
+      exportAuditCSV();
+    } catch (err) {
+      console.error('[Anbarin] export audit failed:', err);
+      toast('دانلود لاگ ناموفق بود؛ دوباره تلاش کنید', 'error');
+    }
+  });
+  document.getElementById('btnClearAudit')?.addEventListener('click', () => {
+    try {
+      clearAuditLog();
+      renderAuditList();
+    } catch (err) {
+      console.error('[Anbarin] clear audit failed:', err);
+      toast('پاک کردن لاگ ناموفق بود', 'error');
+    }
+  });
+  document.getElementById('auditSearch')?.addEventListener('input', () => renderAuditList());
+
   document.getElementById('btnOpenScanner')?.addEventListener('click', () => {
     if (!guardWrite('اسکن')) return;
     const modal = document.getElementById('scannerModal');
@@ -703,7 +886,22 @@ function bindEvents() {
     refreshLists();
   });
 
-  // Team sync
+  // Team sync: keep offline JSON tools and let the user choose offline, live, or hybrid.
+  document.getElementById('teamSyncMode')?.addEventListener('change', () => {
+    saveTeamSyncMode();
+    refreshTeamOnlineStatus();
+    initializeTeamOnlineSync();
+  });
+  document.getElementById('btnSaveTeamOnline')?.addEventListener('click', () => {
+    saveTeamOnlineConfig();
+    refreshTeamOnlineStatus();
+  });
+  document.getElementById('btnSyncTeamOnline')?.addEventListener('click', async () => {
+    await syncTeamOnlineNow();
+    updateHeader();
+    refreshLists();
+    refreshTeamSyncUI();
+  });
   document.getElementById('btnCopyTeamCode')?.addEventListener('click', () => copyTeamSessionCode());
   document.getElementById('btnJoinSession')?.addEventListener('click', () => {
     if (joinTeamSession()) {
@@ -753,6 +951,7 @@ function bindEvents() {
   document.getElementById('btnAccGeneric')?.addEventListener('click', () => exportAccountingDoc('generic'));
   document.getElementById('btnAccHeloo')?.addEventListener('click', () => exportAccountingDoc('heloo'));
   document.getElementById('btnAccSepidar')?.addEventListener('click', () => exportAccountingDoc('sepidar'));
+  initAccountingTemplateUI();
   document.getElementById('btnDoubleDiff')?.addEventListener('click', () => exportDoubleCountMismatches());
   document.getElementById('btnStockAlerts')?.addEventListener('click', () => exportStockAlerts());
 
@@ -807,6 +1006,42 @@ function bindEvents() {
   if (cont) cont.checked = settings.continuousScan !== false;
 }
 
+function updateRolePreview(): void {
+  const select = document.getElementById('setRole') as HTMLSelectElement | null;
+  const description = document.getElementById('rolePreviewDescription');
+  const pill = document.getElementById('rolePreviewPill');
+  const list = document.getElementById('rolePermissionList');
+  if (!select) return;
+  const role = select.value;
+  const roles: Record<string, { label: string; description: string; permissions: string[] }> = {
+    admin: {
+      label: 'مدیر',
+      description: 'دسترسی کامل به تنظیمات و عملیات مدیریتی؛ مناسب مسئول اصلی انبار.',
+      permissions: ['✓ مدیریت تنظیمات و مجوزها', '✓ شمارش، ویرایش و ورود اطلاعات', '✓ عملیات حساس مدیریتی'],
+    },
+    counter: {
+      label: 'شمارنده',
+      description: 'مناسب تیم شمارش؛ امکان ثبت شمارش و کار با کالاها، بدون عملیات مدیریتی حساس.',
+      permissions: ['✓ شمارش و ویرایش شمارش', '✓ اسکن و مشاهده کالاها', '— عملیات حساس مدیریتی محدود است'],
+    },
+    viewer: {
+      label: 'مشاهده‌گر',
+      description: 'فقط مشاهده اطلاعات؛ دکمه‌های تغییر داده و عملیات شمارش غیرفعال می‌شوند.',
+      permissions: ['✓ مشاهده کالاها و گزارش‌ها', '— ثبت یا تغییر شمارش', '— ورود اطلاعات و عملیات مدیریتی'],
+    },
+  };
+  const selected = roles[role] || roles.admin;
+  if (description) description.textContent = selected.description;
+  if (pill) pill.textContent = selected.label;
+  if (list) {
+    list.replaceChildren(...selected.permissions.map((permission) => {
+      const item = document.createElement('span');
+      item.textContent = permission;
+      return item;
+    }));
+  }
+}
+
 function updateHeader() {
   const stats = getCountStats();
   const el = document.getElementById('headerStats');
@@ -848,6 +1083,8 @@ function updateHeader() {
   const pci = document.getElementById('photoCountInfo');
   if (pci) pci.textContent = 'عکس‌های ذخیره‌شده: ' + countPhotos();
   refreshTeamSyncUI();
+  initializeTeamOnlineSync();
+  refreshTeamOnlineStatus();
   updateLicenseUI();
   applyRoleUI();
 }

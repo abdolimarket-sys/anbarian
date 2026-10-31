@@ -147,7 +147,7 @@ export function exportAuditCSV(): void {
     toast('لاگی نیست', 'info');
     return;
   }
-  downloadFile(rowsToCSV(rows), `anbar-audit-${dateStr()}.csv`, 'text/csv;charset=utf-8');
+  downloadFile('\uFEFF' + rowsToCSV(rows), `anbar-audit-${dateStr()}.csv`, 'text/csv;charset=utf-8');
   toast('لاگ دانلود شد', 'success');
   logAudit('export_audit', { count: rows.length });
 }
@@ -156,9 +156,12 @@ export function clearAuditLog(): void {
   if (!confirm('تمام لاگ عملیات پاک شود؟ این کار برگشت‌ناپذیر است.')) return;
   auditLog.length = 0;
   saveAuditLog([]);
+  // هم ذخیره محلی لاگ و هم snapshot کامل برنامه را به‌روز کن.
   save(true);
-  toast('لاگ پاک شد', 'success');
+  const search = document.getElementById('auditSearch') as HTMLInputElement | null;
+  if (search) search.value = '';
   renderAuditList();
+  toast('لاگ پاک شد', 'success');
 }
 
 /** تزریق استایل یک‌بار */

@@ -10,7 +10,7 @@
 - [x] ماژول `storage` (IndexedDB + مهاجرت از localStorage)
 - [x] ماژول `state` (single source of truth + index + undo + audit)
 - [x] ماژول `ui` پایه (toast + page navigation + theme)
-- [x] **ماژول `scanner`** (BarcodeDetector + Html5Qrcode + USB/BT + دستی)
+- [x] **ماژول `scanner`** (بازنویسی چرخه‌عمر دوربین، Html5Qrcode/ZXing، BarcodeDetector جایگزین، USB/BT و دستی)
 - [x] **ماژول `count`** (شمارش، undo، double-count، مودال تعداد)
 - [x] **ماژول `import-export`** (CSV / XLSX / JSON + نگاشت فارسی)
 - [x] **Virtual List** برای لیست کالاها و شمارش

@@ -3,10 +3,13 @@
  */
 
 import type { ToastType } from '@/types';
+import { Capacitor } from '@capacitor/core';
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function toast(message: string, type: ToastType = 'info'): void {
+  // در اندروید پیام موفقیت دانلود را فقط بعد از تأیید واقعی ذخیره نشان می‌دهیم.
+  if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android' && /دانلود شد|فایل ذخیره شد/.test(message)) return;
   let el = document.getElementById('toast');
   if (!el) {
     el = document.createElement('div');

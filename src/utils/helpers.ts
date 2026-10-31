@@ -1,5 +1,26 @@
 /** ابزارهای عمومی */
 
+import { Capacitor, registerPlugin } from '@capacitor/core';
+
+interface SaveFilePluginResult {
+  cancelled: boolean;
+  uri?: string;
+  filename?: string;
+}
+interface SaveFilePluginAPI {
+  save(options: { filename: string; mimeType: string; data: string }): Promise<SaveFilePluginResult>;
+}
+const NativeSaveFile = registerPlugin<SaveFilePluginAPI>('SaveFile');
+
+
+/** تبدیل ارقام فارسی و عربی به ارقام استاندارد برای بارکد و کد کالا */
+export function normalizeDigits(value: unknown): string {
+  return String(value ?? '')
+    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .trim();
+}
+
 export function esc(str: unknown): string {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
@@ -50,6 +71,39 @@ export function downloadFile(
 ): void {
   const blob =
     typeof content === 'string' ? new Blob([content], { type: mime }) : content;
+
+  // در اپ اندرویدی، پنجره رسمی «ذخیره در» سیستم‌عامل را باز کن؛
+  // کاربر پوشه و نام فایل را خودش انتخاب می‌کند.
+  if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
+    void (async () => {
+      try {
+        const buffer = await blob.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+        const result = await NativeSaveFile.save({
+          filename,
+          mimeType: blob.type || mime || 'application/octet-stream',
+          data: btoa(binary),
+        });
+        if (result.cancelled) return;
+        window.dispatchEvent(new CustomEvent('anbarin:file-saved', {
+          detail: { filename: result.filename || filename, uri: result.uri || '' },
+        }));
+      } catch (error) {
+        console.error('ذخیره فایل در اندروید ناموفق بود', error);
+        window.dispatchEvent(new CustomEvent('anbarin:file-save-error', {
+          detail: { filename, message: String(error) },
+        }));
+      }
+    })();
+    return;
+  }
+
+  // نسخه وب / مرورگر: رفتار دانلود معمول حفظ می‌شود.
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

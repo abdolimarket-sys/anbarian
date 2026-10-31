@@ -1,13 +1,14 @@
 /**
- * ماژول اسکنر بارکد
- * - BarcodeDetector بومی (اولویت)
- * - Fallback به Html5Qrcode (اگر لود شده باشد)
- * - پشتیبانی اسکنر USB/Bluetooth (keyboard wedge)
- * - ورود دستی
+ * Anbarin Barcode Scanner
+ * Stable camera lifecycle, Html5Qrcode/ZXing decoding first, native BarcodeDetector fallback,
+ * plus USB/Bluetooth keyboard-wedge and manual entry.
+ *
+ * Public API intentionally matches the previous module so application flows remain unchanged.
  */
 
 import type { AppSettings } from '@/types';
 import { toast } from './ui';
+import { normalizeDigits } from '@/utils/helpers';
 
 export type ScanSource = 'camera' | 'native' | 'html5' | 'bt' | 'manual';
 
@@ -18,55 +19,57 @@ export interface ScanResult {
 }
 
 export interface ScannerOptions {
-  /** کانتینر DOM برای ویدیو (مثلاً #scanner-container) */
   containerId: string;
-  /** تنظیمات برنامه */
   getSettings: () => AppSettings;
-  /** آیا الان اجازه شمارش/اسکن وجود دارد؟ */
   canScan?: () => boolean;
-  /** آیا مودال تأیید تعداد باز است؟ */
   isQtyModalOpen?: () => boolean;
-  /** callback اصلی وقتی بارکد معتبر شناسایی شد */
   onScan: (result: ScanResult) => void;
-  /** برای پر کردن فیلد خاص (مثلاً فرم کالا) */
   onFieldFill?: (fieldId: string, code: string) => void;
 }
 
-// ——— وضعیت داخلی ———
+type DetectorResult = { rawValue?: string };
+type NativeDetector = {
+  detect: (source: HTMLVideoElement) => Promise<DetectorResult[]>;
+};
+
+declare global {
+  interface Window {
+    Html5Qrcode?: any;
+  }
+}
+
 let opts: ScannerOptions | null = null;
 let active = false;
 let quickMode = false;
 let scanTargetField: string | null = null;
+let generation = 0;
 
-// Native scanner
+let html5Instance: any = null;
+let html5Running = false;
 let nativeStream: MediaStream | null = null;
 let nativeVideo: HTMLVideoElement | null = null;
-let nativeDetector: { detect: (source: ImageBitmapSource | HTMLVideoElement | HTMLCanvasElement) => Promise<Array<{ rawValue: string }>> } | null = null;
+let nativeDetector: NativeDetector | null = null;
 let nativeRaf = 0;
 let nativeBusy = false;
-let nativeCanvas: HTMLCanvasElement | null = null;
-let nativeCtx: CanvasRenderingContext2D | null = null;
-let frameSkip = 0;
 let torchOn = false;
 
-// Html5Qrcode fallback (any برای جلوگیری از وابستگی سخت)
-let html5Instance: any = null;
-
-// Debounce / guard
 let lastScanTime = 0;
 let lastScanCode = '';
-const SCAN_COOLDOWN_MS = 380;
-const SAME_CODE_COOLDOWN_MS = 1200;
+const GLOBAL_COOLDOWN_MS = 260;
+const SAME_CODE_COOLDOWN_MS = 1100;
 
-// Bluetooth / keyboard wedge
 let btBuffer = '';
 let btTimer: ReturnType<typeof setTimeout> | null = null;
 let btListenerAttached = false;
-
-// Audio
 let audioCtx: AudioContext | null = null;
+let scriptLoadPromise: Promise<boolean> | null = null;
+let lifecycleQueue: Promise<void> = Promise.resolve();
 
-// ——— Public API ———
+const BARCODE_FORMAT_NAMES = [
+  'EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'CODE_128',
+  'CODE_39', 'ITF', 'CODABAR', 'QR_CODE', 'DATA_MATRIX',
+  'PDF_417', 'AZTEC',
+];
 
 export function initScanner(options: ScannerOptions): void {
   opts = options;
@@ -83,36 +86,45 @@ export function openScanner(options?: {
   title?: string;
 }): void {
   if (!opts) {
-    console.warn('[scanner] not initialized');
+    console.warn('[scanner] initScanner must be called before openScanner');
     return;
   }
+
   scanTargetField = options?.targetField ?? null;
   quickMode = !!options?.quick;
   active = true;
+  generation++;
 
-  // UI title اگر وجود داشته باشد
   const titleEl = document.getElementById('scannerTitle');
   if (titleEl && options?.title) titleEl.textContent = options.title;
 
   const modal = document.getElementById('scannerModal');
-  if (modal) modal.classList.add('show');
+  if (modal) {
+    modal.classList.add('show');
+    // Keep compatibility with the app's existing modal implementation.
+    modal.style.display = 'flex';
+  }
 
-  startCamera();
+  void startCamera(generation);
 }
 
 export function closeScanner(): void {
   active = false;
+  generation++;
   scanTargetField = null;
   quickMode = false;
-  stopCamera();
+  void stopCamera();
 
   const modal = document.getElementById('scannerModal');
-  if (modal) modal.classList.remove('show');
+  if (modal) {
+    modal.classList.remove('show');
+    modal.style.display = 'none';
+  }
 }
 
 export function submitManualBarcode(raw?: string): void {
   const input = document.getElementById('manualBarcode') as HTMLInputElement | null;
-  const code = (raw ?? input?.value ?? '').trim();
+  const code = normalizeDigits(raw ?? input?.value ?? '').trim();
   if (!code) {
     toast('بارکد را وارد کنید', 'error');
     return;
@@ -122,96 +134,110 @@ export function submitManualBarcode(raw?: string): void {
 }
 
 export async function toggleTorch(): Promise<void> {
-  if (!nativeStream) {
-    toast('نور فقط در حالت دوربین بومی در دسترس است', 'info');
+  const track = nativeStream?.getVideoTracks()[0];
+  if (!track) {
+    toast('نور در این حالت دوربین در دسترس نیست', 'info');
     return;
   }
   try {
-    const track = nativeStream.getVideoTracks()[0];
-    const caps = track.getCapabilities?.() as any;
-    if (!caps?.torch) {
-      toast('این دوربین از نور پشتیبانی نمی‌کند', 'error');
+    const capabilities = track.getCapabilities?.() as any;
+    if (!capabilities?.torch) {
+      toast('این دوربین از چراغ‌قوه پشتیبانی نمی‌کند', 'info');
       return;
     }
-    torchOn = !torchOn;
-    await track.applyConstraints({ advanced: [{ torch: torchOn }] as any });
-    const btn = document.getElementById('torchBtn');
-    if (btn) btn.textContent = torchOn ? '🔦 خاموش' : '🔦 نور';
-  } catch (e) {
-    console.warn('torch failed', e);
-    toast('تغییر نور ممکن نشد', 'error');
+    const next = !torchOn;
+    await track.applyConstraints({ advanced: [{ torch: next }] } as any);
+    torchOn = next;
+    const button = document.getElementById('torchBtn');
+    if (button) button.textContent = torchOn ? '🔦 خاموش' : '🔦 نور';
+  } catch (error) {
+    console.warn('[scanner] torch unavailable', error);
+    toast('تغییر وضعیت چراغ‌قوه ممکن نشد', 'error');
   }
 }
 
 export function restartCamera(): void {
-  stopCamera();
-  setTimeout(() => startCamera(), 200);
+  if (!active) return;
+  const token = ++generation;
+  void (async () => {
+    await stopCamera();
+    await delay(180);
+    if (active && token === generation) await startCamera(token);
+  })();
 }
 
 export function playBeep(ok: boolean): void {
-  const settings = opts?.getSettings();
-  if (!settings?.soundOnScan) return;
+  if (!opts?.getSettings()?.soundOnScan) return;
   try {
     if (!audioCtx) {
-      audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextCtor) return;
+      audioCtx = new AudioContextCtor();
     }
-    const o = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    o.connect(g);
-    g.connect(audioCtx.destination);
-    o.frequency.value = ok ? 880 : 200;
-    g.gain.value = 0.15;
-    o.start();
-    setTimeout(() => o.stop(), ok ? 80 : 150);
+    if (audioCtx.state === 'suspended') void audioCtx.resume();
+    const oscillator = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    oscillator.connect(gain);
+    gain.connect(audioCtx.destination);
+    oscillator.frequency.value = ok ? 880 : 200;
+    gain.gain.value = 0.12;
+    oscillator.start();
+    window.setTimeout(() => {
+      try { oscillator.stop(); } catch { /* already stopped */ }
+    }, ok ? 75 : 140);
   } catch {
-    // ignore
+    // Audio is optional; never interrupt scanning.
   }
 }
 
 export function vibrateOnFail(): void {
-  const settings = opts?.getSettings();
-  if (settings?.vibrateOnScan && navigator.vibrate) {
-    navigator.vibrate([50, 30, 50]);
+  if (opts?.getSettings()?.vibrateOnScan && navigator.vibrate) {
+    navigator.vibrate([45, 25, 45]);
   }
 }
 
-/** برای استفاده از بیرون وقتی می‌خواهیم guard اسکن تکراری را ریست کنیم */
 export function markConfirmed(code: string): void {
-  lastScanCode = code;
+  lastScanCode = normalizeDigits(code).trim();
   lastScanTime = Date.now();
 }
 
-// ——— Internal ———
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isCurrent(token: number): boolean {
+  return active && token === generation;
+}
 
 function shouldAcceptScan(code: string): boolean {
-  const now = Date.now();
-  if (now - lastScanTime < SCAN_COOLDOWN_MS) return false;
-  if (code === lastScanCode && now - lastScanTime < SAME_CODE_COOLDOWN_MS) return false;
+  const normalized = normalizeDigits(code).trim();
+  if (!normalized) return false;
+  const elapsed = Date.now() - lastScanTime;
+  if (normalized === lastScanCode && elapsed < SAME_CODE_COOLDOWN_MS) return false;
+  if (elapsed < GLOBAL_COOLDOWN_MS) return false;
   return true;
 }
 
-function emitScan(code: string, source: ScanSource): void {
-  code = String(code).trim();
-  if (!code || !opts) return;
+function emitScan(rawCode: string, source: ScanSource): void {
+  const code = normalizeDigits(rawCode).trim();
+  if (!code || !opts || !shouldAcceptScan(code)) return;
 
   if (opts.canScan && !opts.canScan()) {
     toast('نقش مشاهده‌گر اجازه شمارش ندارد', 'error');
     return;
   }
   if (opts.isQtyModalOpen?.()) return;
-  if (!shouldAcceptScan(code) && code === lastScanCode) return;
 
   lastScanTime = Date.now();
   lastScanCode = code;
 
-  // حالت پر کردن فیلد
   if (scanTargetField) {
     playBeep(true);
     opts.onFieldFill?.(scanTargetField, code);
     toast('بارکد ثبت شد', 'success');
-    // در حالت فیلد معمولاً اسکنر را می‌بندیم مگر continuous
+
     const continuous =
-      (document.getElementById('scannerContinuous') as HTMLInputElement)?.checked ??
+      (document.getElementById('scannerContinuous') as HTMLInputElement | null)?.checked ??
       opts.getSettings().continuousScan;
     if (!continuous) closeScanner();
     return;
@@ -220,228 +246,312 @@ function emitScan(code: string, source: ScanSource): void {
   opts.onScan({ code, source, at: lastScanTime });
 }
 
-async function startCamera(): Promise<void> {
+function getBarcodeFormats(): number[] | undefined {
+  const supported = (window as any).Html5QrcodeSupportedFormats as Record<string, number> | undefined;
+  if (!supported) return undefined;
+  const formats = BARCODE_FORMAT_NAMES
+    .map((name) => supported[name])
+    .filter((value): value is number => typeof value === 'number');
+  return formats.length ? formats : undefined;
+}
+
+/**
+ * The script is bundled locally in /public. Loading it on demand avoids the
+ * race between deferred classic scripts and the application's module script.
+ */
+async function ensureHtml5Library(): Promise<boolean> {
+  if (window.Html5Qrcode) return true;
+  if (scriptLoadPromise) return scriptLoadPromise;
+
+  scriptLoadPromise = new Promise<boolean>((resolve) => {
+    const existing = document.querySelector<HTMLScriptElement>(
+      'script[src*="html5-qrcode"]'
+    );
+    const script = existing ?? document.createElement('script');
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok && !!window.Html5Qrcode);
+    };
+    const timeout = window.setTimeout(() => finish(false), 9000);
+
+    script.addEventListener('load', () => {
+      window.clearTimeout(timeout);
+      finish(true);
+    }, { once: true });
+    script.addEventListener('error', () => {
+      window.clearTimeout(timeout);
+      finish(false);
+    }, { once: true });
+
+    if (!existing) {
+      script.src = new URL('./html5-qrcode.min.js', document.baseURI).toString();
+      script.async = true;
+      document.head.appendChild(script);
+    } else if (window.Html5Qrcode) {
+      window.clearTimeout(timeout);
+      finish(true);
+    }
+  }).finally(() => {
+    if (!window.Html5Qrcode) scriptLoadPromise = null;
+  });
+
+  return scriptLoadPromise;
+}
+
+async function startCamera(token: number): Promise<void> {
+  if (!opts || !isCurrent(token)) return;
   torchOn = false;
-  const btn = document.getElementById('torchBtn');
-  if (btn) btn.textContent = '🔦 نور';
+  const torchButton = document.getElementById('torchBtn');
+  if (torchButton) torchButton.textContent = '🔦 نور';
 
-  // اول native
-  const nativeOk = await tryStartNative();
-  if (nativeOk) return;
-
-  // بعد Html5Qrcode اگر موجود باشد
-  if (typeof (window as any).Html5Qrcode !== 'undefined') {
-    await tryStartHtml5();
+  const host = document.getElementById(opts.containerId);
+  if (!host) {
+    toast('محل نمایش دوربین پیدا نشد', 'error');
     return;
   }
 
+  await stopCamera();
+  if (!isCurrent(token)) return;
+
+  host.innerHTML = '';
+  host.setAttribute('aria-live', 'polite');
+
+  // Html5Qrcode uses the bundled ZXing decoder and is the primary, stable
+  // path on Android WebView. Do not rely on BarcodeDetector being present.
+  const libraryReady = await ensureHtml5Library();
+  if (!isCurrent(token)) return;
+
+  if (libraryReady && await startHtml5(token)) return;
+  if (!isCurrent(token)) return;
+
+  if (await startNative(token)) return;
+  if (!isCurrent(token)) return;
+
   toast(
-    'اسکن دوربین در این مرورگر پشتیبانی نمی‌شود؛ از بارکدخوان USB/Bluetooth یا ورود دستی استفاده کنید',
+    'اسکنر راه‌اندازی نشد. مجوز دوربین را بررسی کنید یا از ورود دستی/بارکدخوان USB استفاده کنید.',
     'error'
   );
-  const manual = document.getElementById('manualBarcode') as HTMLInputElement | null;
-  manual?.focus();
+  document.getElementById('manualBarcode')?.focus();
 }
 
-async function tryStartNative(): Promise<boolean> {
-  if (
-    !('mediaDevices' in navigator) ||
-    !navigator.mediaDevices.getUserMedia ||
-    !('BarcodeDetector' in window)
-  ) {
-    return false;
-  }
+async function startHtml5(token: number): Promise<boolean> {
+  if (!opts || !window.Html5Qrcode || !isCurrent(token)) return false;
 
-  const host = document.getElementById(opts!.containerId);
+  const host = document.getElementById(opts.containerId);
   if (!host) return false;
 
   try {
-    const supported = await (window as any).BarcodeDetector.getSupportedFormats();
+    // A fresh instance avoids stale internal state after interrupted sessions.
+    if (html5Instance) {
+      try {
+        if (html5Running) await html5Instance.stop();
+      } catch { /* ignore stale session */ }
+      try { await html5Instance.clear(); } catch { /* ignore stale DOM */ }
+      html5Instance = null;
+      html5Running = false;
+    }
+
+    html5Instance = new window.Html5Qrcode(opts.containerId, {
+      verbose: false,
+      formatsToSupport: getBarcodeFormats(),
+    });
+
+    const config: Record<string, unknown> = {
+      fps: 15,
+      disableFlip: false,
+      aspectRatio: 1.7777778,
+      experimentalFeatures: { useBarCodeDetectorIfSupported: false },
+    };
+
+    const onDecoded = (decodedText: string) => {
+      if (!isCurrent(token) || !decodedText) return;
+      emitScan(decodedText, 'html5');
+    };
+    const onDecodeError = () => {
+      // Per-frame decode misses are normal; keep the UI quiet.
+    };
+
+    // Prefer an identified rear camera, then let the browser resolve facingMode.
+    let cameraConfig: string | { facingMode: string } = { facingMode: 'environment' };
+    try {
+      const cameras = await window.Html5Qrcode.getCameras();
+      if (!isCurrent(token)) return false;
+      if (Array.isArray(cameras) && cameras.length) {
+        const rear = cameras.find((camera: any) =>
+          /back|rear|environment|world|پشت|عقب/i.test(camera.label || '')
+        );
+        cameraConfig = (rear || cameras[cameras.length - 1]).id;
+      }
+    } catch {
+      // Permission prompts and camera enumeration differ across WebViews.
+    }
+
+    try {
+      await html5Instance.start(cameraConfig, config, onDecoded, onDecodeError);
+    } catch (firstError) {
+      if (!isCurrent(token)) return false;
+      // Retry once with the standard environment constraint when a camera ID
+      // selected by WebView is stale or rejected.
+      if (typeof cameraConfig === 'string') {
+        try {
+          try {
+            if (html5Instance?.isScanning) await html5Instance.stop();
+          } catch { /* release a partially opened camera */ }
+          try { await html5Instance?.clear(); } catch { /* clear stale renderer */ }
+          html5Instance = new window.Html5Qrcode(opts.containerId, {
+            verbose: false,
+            formatsToSupport: getBarcodeFormats(),
+          });
+          await html5Instance.start({ facingMode: 'environment' }, config, onDecoded, onDecodeError);
+        } catch (secondError) {
+          console.warn('[scanner] html5 start failed', firstError, secondError);
+          try {
+            if (html5Instance?.isScanning) await html5Instance.stop();
+            await html5Instance?.clear();
+          } catch { /* ignore cleanup */ }
+          html5Instance = null;
+          html5Running = false;
+          return false;
+        }
+      } else {
+        console.warn('[scanner] html5 start failed', firstError);
+        try {
+          if (html5Instance?.isScanning) await html5Instance.stop();
+          await html5Instance?.clear();
+        } catch { /* ignore cleanup */ }
+        html5Instance = null;
+        html5Running = false;
+        return false;
+      }
+    }
+
+    if (!isCurrent(token)) {
+      try { await html5Instance.stop(); } catch { /* ignore */ }
+      return false;
+    }
+    html5Running = true;
+    addScannerStatus('دوربین آماده است؛ بارکد را مقابل دوربین بگیرید');
+    return true;
+  } catch (error) {
+    console.error('[scanner] html5 initialization failed', error);
+    try {
+      if (html5Instance && html5Running) await html5Instance.stop();
+      if (html5Instance) await html5Instance.clear();
+    } catch { /* ignore cleanup errors */ }
+    html5Instance = null;
+    html5Running = false;
+    return false;
+  }
+}
+
+async function startNative(token: number): Promise<boolean> {
+  const Detector = (window as any).BarcodeDetector;
+  if (!navigator.mediaDevices?.getUserMedia || !Detector || !opts) return false;
+
+  const host = document.getElementById(opts.containerId);
+  if (!host) return false;
+
+  try {
+    const supported: string[] = await Detector.getSupportedFormats();
     const preferred = [
-      'ean_13',
-      'ean_8',
-      'upc_a',
-      'upc_e',
-      'code_128',
-      'code_39',
-      'itf',
-      'qr_code',
-      'codabar',
+      'ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128',
+      'code_39', 'itf', 'codabar', 'qr_code', 'data_matrix',
     ];
-    const formats = preferred.filter((f) => supported.includes(f));
+    const formats = preferred.filter((format) => supported.includes(format));
     if (!formats.length) return false;
 
-    nativeDetector = new (window as any).BarcodeDetector({ formats });
-
+    nativeDetector = new Detector({ formats });
     const video = document.createElement('video');
-    video.setAttribute('playsinline', '');
-    video.setAttribute('muted', '');
     video.autoplay = true;
     video.muted = true;
     video.playsInline = true;
-    video.style.cssText =
-      'width:100%;height:100%;display:block;object-fit:cover;background:#0b1f1c';
-
+    video.setAttribute('playsinline', '');
+    video.setAttribute('muted', '');
+    video.style.cssText = 'width:100%;height:100%;display:block;object-fit:contain;background:#101817';
     host.innerHTML = '';
     host.appendChild(video);
-
-    // راهنمای اسکن
-    const guide = document.createElement('div');
-    guide.className = 'scan-guide';
-    guide.innerHTML =
-      '<div class="scan-guide-frame"></div><div class="scan-guide-label">بارکد را داخل نوار افقی بگیرید</div>';
-    host.appendChild(guide);
-
     nativeVideo = video;
 
-    const constraintsList: MediaStreamConstraints[] = [
-      {
-        audio: false,
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 },
-        },
-      },
-      {
-        audio: false,
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-      },
-      { audio: false, video: { facingMode: 'environment' } },
+    const constraints: MediaStreamConstraints[] = [
+      { audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } },
+      { audio: false, video: { facingMode: { ideal: 'environment' } } },
       { audio: false, video: true },
     ];
 
     let stream: MediaStream | null = null;
-    let lastErr: unknown = null;
-    for (const c of constraintsList) {
+    let lastError: unknown;
+    for (const constraint of constraints) {
       try {
-        stream = await navigator.mediaDevices.getUserMedia(c);
+        stream = await navigator.mediaDevices.getUserMedia(constraint);
         break;
-      } catch (e) {
-        lastErr = e;
+      } catch (error) {
+        lastError = error;
       }
     }
-    if (!stream) throw lastErr || new Error('camera');
+    if (!stream) throw lastError || new Error('Camera unavailable');
+    if (!isCurrent(token)) {
+      stream.getTracks().forEach((track) => track.stop());
+      return false;
+    }
 
     nativeStream = stream;
     video.srcObject = stream;
     await video.play();
+    if (!isCurrent(token)) return false;
 
-    // فوکوس پیوسته
     try {
       const track = stream.getVideoTracks()[0];
-      const caps = track.getCapabilities?.() as any;
-      if (caps?.focusMode?.includes('continuous')) {
-        await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] as any });
+      const capabilities = track.getCapabilities?.() as any;
+      if (capabilities?.focusMode?.includes('continuous')) {
+        await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] } as any);
       }
-    } catch {
-      // ignore
-    }
-
-    nativeCanvas = document.createElement('canvas');
-    nativeCtx = nativeCanvas.getContext('2d', { willReadFrequently: true });
-    frameSkip = 0;
-    nativeBusy = false;
+    } catch { /* focus mode is optional */ }
 
     const loop = async () => {
-      if (!nativeVideo || !nativeStream || !active) return;
+      if (!isCurrent(token) || !nativeVideo || !nativeDetector) return;
       nativeRaf = requestAnimationFrame(loop);
-
-      frameSkip++;
-      if (frameSkip % 2) return; // هر ۲ فریم یک‌بار
-      if (nativeBusy || video.readyState < 2) return;
-      if (opts?.isQtyModalOpen?.()) return;
+      if (nativeBusy || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
 
       nativeBusy = true;
       try {
-        let source: HTMLVideoElement | HTMLCanvasElement = video;
-
-        // برش نوار میانی برای تمرکز روی بارکد خطی
-        try {
-          const vw = video.videoWidth;
-          const vh = video.videoHeight;
-          if (vw > 0 && vh > 0 && nativeCtx && nativeCanvas) {
-            const cropH = Math.max(80, Math.floor(vh * 0.32));
-            const cropY = Math.floor((vh - cropH) / 2);
-            const targetW = Math.min(960, vw);
-            const scale = targetW / vw;
-            const targetH = Math.floor(cropH * scale);
-            if (nativeCanvas.width !== targetW) nativeCanvas.width = targetW;
-            if (nativeCanvas.height !== targetH) nativeCanvas.height = targetH;
-            nativeCtx.drawImage(video, 0, cropY, vw, cropH, 0, 0, targetW, targetH);
-            source = nativeCanvas;
-          }
-        } catch {
-          source = video;
-        }
-
-        const found = await nativeDetector!.detect(source);
-        if (found?.length) {
-          const code = String(found[0].rawValue || '').trim();
-          if (code && shouldAcceptScan(code)) {
-            emitScan(code, 'native');
-          }
+        const results = await nativeDetector.detect(video);
+        if (isCurrent(token) && results?.length) {
+          const value = String(results[0].rawValue || '').trim();
+          if (value) emitScan(value, 'native');
         }
       } catch {
-        // ignore frame errors
+        // A frame can be undecodable while focus/exposure adjusts.
       } finally {
         nativeBusy = false;
       }
     };
 
     nativeRaf = requestAnimationFrame(loop);
+    addScannerStatus('دوربین آماده است؛ بارکد را مقابل دوربین بگیرید');
     return true;
-  } catch (err) {
-    console.error('[scanner] native failed', err);
+  } catch (error) {
+    console.warn('[scanner] native fallback failed', error);
     stopNative();
     return false;
   }
 }
 
-async function tryStartHtml5(): Promise<void> {
-  const Html5Qrcode = (window as any).Html5Qrcode;
-  if (!Html5Qrcode || !opts) return;
-
-  try {
-    if (!html5Instance) {
-      html5Instance = new Html5Qrcode(opts.containerId);
-    }
-
-    const formats = (window as any).Html5QrcodeSupportedFormats
-      ? [
-          (window as any).Html5QrcodeSupportedFormats.EAN_13,
-          (window as any).Html5QrcodeSupportedFormats.EAN_8,
-          (window as any).Html5QrcodeSupportedFormats.UPC_A,
-          (window as any).Html5QrcodeSupportedFormats.UPC_E,
-          (window as any).Html5QrcodeSupportedFormats.CODE_128,
-          (window as any).Html5QrcodeSupportedFormats.CODE_39,
-          (window as any).Html5QrcodeSupportedFormats.ITF,
-          (window as any).Html5QrcodeSupportedFormats.QR_CODE,
-        ]
-      : undefined;
-
-    await html5Instance.start(
-      { facingMode: 'environment' },
-      {
-        fps: 10,
-        qrbox: { width: 280, height: 120 },
-        formatsToSupport: formats,
-        aspectRatio: 1.777,
-      },
-      (decoded: string) => {
-        if (shouldAcceptScan(decoded)) emitScan(decoded, 'html5');
-      },
-      () => {}
-    );
-  } catch (err) {
-    console.error('[scanner] html5 failed', err);
-    toast('راه‌اندازی دوربین ناموفق بود', 'error');
+function addScannerStatus(message: string): void {
+  const host = opts ? document.getElementById(opts.containerId) : null;
+  if (!host) return;
+  let status = document.getElementById('scannerRuntimeStatus');
+  if (!status) {
+    status = document.createElement('div');
+    status.id = 'scannerRuntimeStatus';
+    status.className = 'scanner-runtime-status';
+    status.style.cssText =
+      'position:absolute;left:8px;right:8px;bottom:8px;z-index:5;text-align:center;padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.55);color:#fff;font-size:12px;pointer-events:none';
+    if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+    host.appendChild(status);
   }
+  status.textContent = message;
 }
 
 function stopNative(): void {
@@ -450,66 +560,69 @@ function stopNative(): void {
     nativeRaf = 0;
   }
   if (nativeStream) {
-    nativeStream.getTracks().forEach((t) => t.stop());
+    nativeStream.getTracks().forEach((track) => {
+      try { track.stop(); } catch { /* ignore */ }
+    });
     nativeStream = null;
   }
-  nativeVideo = null;
+  if (nativeVideo) {
+    try { nativeVideo.pause(); } catch { /* ignore */ }
+    nativeVideo.srcObject = null;
+    nativeVideo = null;
+  }
   nativeDetector = null;
-  nativeCanvas = null;
-  nativeCtx = null;
   nativeBusy = false;
   torchOn = false;
 }
 
 async function stopHtml5(): Promise<void> {
-  if (html5Instance) {
-    try {
-      if (html5Instance.isScanning) await html5Instance.stop();
-    } catch {
-      // ignore
-    }
+  if (!html5Instance) return;
+  try {
+    if (html5Running || html5Instance.isScanning) await html5Instance.stop();
+  } catch (error) {
+    console.debug('[scanner] html5 stop cleanup', error);
+  } finally {
+    html5Running = false;
+    try { await html5Instance.clear(); } catch { /* ignore */ }
   }
 }
 
-function stopCamera(): void {
-  stopNative();
-  stopHtml5();
-
-  const host = opts ? document.getElementById(opts.containerId) : null;
-  if (host) host.innerHTML = '';
+async function stopCamera(): Promise<void> {
+  // Serialize stop operations so a quick close/reopen cannot let an older
+  // cleanup tear down the newly opened camera session.
+  const operation = lifecycleQueue.then(async () => {
+    stopNative();
+    await stopHtml5();
+    const host = opts ? document.getElementById(opts.containerId) : null;
+    if (host) host.innerHTML = '';
+  });
+  lifecycleQueue = operation.catch(() => undefined);
+  await operation;
 }
-
-// ——— Bluetooth / USB keyboard wedge ———
 
 function attachBluetoothListener(): void {
   if (btListenerAttached) return;
   btListenerAttached = true;
 
-  document.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (!opts) return;
-    const settings = opts.getSettings();
-    if (settings.btScanner === false) return;
-
-    const tag = ((e.target as HTMLElement)?.tagName || '').toLowerCase();
-
-    // Ctrl+Z برای undo از بیرون هندل می‌شود؛ اینجا کاری نمی‌کنیم
+  document.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (!opts || opts.getSettings().btScanner === false) return;
+    const target = event.target as HTMLElement | null;
+    const tag = (target?.tagName || '').toLowerCase();
 
     if (tag === 'input' || tag === 'textarea' || tag === 'select') {
-      if (tag === 'input' && (e.target as HTMLInputElement).type === 'number') return;
-      if (e.key !== 'Enter') return;
+      if (tag === 'input' && (target as HTMLInputElement).type === 'number') return;
+      if (event.key !== 'Enter') return;
     }
 
-    if (e.key === 'Enter') {
+    if (event.key === 'Enter') {
       if (btBuffer.length >= 3) {
-        e.preventDefault();
+        event.preventDefault();
         const code = btBuffer;
         btBuffer = '';
-        if (btTimer) {
-          clearTimeout(btTimer);
-          btTimer = null;
-        }
-        const st = document.getElementById('btStatus');
-        if (st) st.textContent = 'اسکن شد: ' + code;
+        if (btTimer) clearTimeout(btTimer);
+        btTimer = null;
+        const status = document.getElementById('btStatus');
+        if (status) status.textContent = 'اسکن شد: ' + code;
         emitScan(code, 'bt');
       } else {
         btBuffer = '';
@@ -517,18 +630,14 @@ function attachBluetoothListener(): void {
       return;
     }
 
-    if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-      btBuffer += e.key;
+      btBuffer += event.key;
       if (btTimer) clearTimeout(btTimer);
-      btTimer = setTimeout(() => {
-        btBuffer = '';
-      }, 80);
+      btTimer = window.setTimeout(() => { btBuffer = ''; }, 140);
     }
   });
 }
-
-// ——— Helpers for capability detection ———
 
 export function getScannerCapabilities(): {
   mediaDevices: boolean;
@@ -536,8 +645,8 @@ export function getScannerCapabilities(): {
   html5Qrcode: boolean;
 } {
   return {
-    mediaDevices: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
-    barcodeDetector: 'BarcodeDetector' in window,
-    html5Qrcode: typeof (window as any).Html5Qrcode !== 'undefined',
+    mediaDevices: !!navigator.mediaDevices?.getUserMedia,
+    barcodeDetector: typeof (window as any).BarcodeDetector !== 'undefined',
+    html5Qrcode: typeof window.Html5Qrcode !== 'undefined',
   };
 }

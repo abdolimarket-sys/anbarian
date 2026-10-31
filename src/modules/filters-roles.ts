@@ -112,7 +112,6 @@ export function applyRoleUI(): void {
     '#btnImportPhotos',
     '#btnActivateLicense',
     '#btnDeactivateLicense',
-    '#btnSaveSettings',
     '#btnExportTeam',
     '#qtyConfirm',
   ];
@@ -134,7 +133,9 @@ export function applyRoleUI(): void {
   });
 
   // تنظیمات حساس فقط ادمین
-  const adminOnly = ['#setRole', '#btnClearAudit', '#btnDeactivateLicense'];
+  // انتخاب نقش و ذخیره تنظیمات باید همیشه در دسترس بماند؛ وگرنه با انتخاب نقش غیرمدیر،
+  // امکان برگشت به نقش مدیر از داخل برنامه از بین می‌رود.
+  const adminOnly = ['#btnClearAudit', '#btnDeactivateLicense'];
   adminOnly.forEach((sel) => {
     const el = document.querySelector(sel) as HTMLInputElement | HTMLButtonElement | null;
     if (!el) return;

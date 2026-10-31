@@ -71,6 +71,12 @@ header {
   align-items: center;
 }
 
+
+.logo-area { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.logo-area .brand-logo { width: 44px; height: 44px; object-fit: contain; flex: 0 0 auto; border-radius: 8px; }
+.logo-area .brand-title { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
+.logo-area .role-badge { margin-inline-start: 2px; }
+
 .logo-area strong {
   font-size: 1.25rem;
   font-weight: 800;
@@ -174,9 +180,54 @@ main {
 }
 
 .btn-secondary {
-  background: var(--primary-soft);
+  background: var(--card);
   color: var(--primary-dark);
+  border: 1px solid var(--primary);
+  box-shadow: 0 1px 2px rgba(15, 118, 110, 0.10);
 }
+
+/* حالت فعال باید از حالت غیرفعال کاملاً قابل تشخیص باشد؛ مخصوص صفحه موبایل */
+.btn:disabled, .btn[aria-disabled='true'] {
+  background: #e5e7eb !important;
+  background-image: none !important;
+  color: #6b7280 !important;
+  border-color: #d1d5db !important;
+  box-shadow: none !important;
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
+.btn-secondary:not(:disabled):active {
+  background: var(--primary-soft);
+}
+
+/* دکمه‌های لاگ باید در حالت فعال از پس‌زمینه کارت واضحاً متمایز باشند. */
+.btn-audit-export {
+  background: #0f766e;
+  color: #ffffff;
+  border: 1px solid #0f766e;
+  box-shadow: 0 2px 5px rgba(15, 118, 110, 0.22);
+}
+.btn-audit-clear {
+  background: #be123c;
+  color: #ffffff;
+  border: 1px solid #9f1239;
+  box-shadow: 0 2px 5px rgba(190, 18, 60, 0.18);
+}
+.btn-audit-export:hover:not(:disabled) { background: #115e59; }
+.btn-audit-clear:hover:not(:disabled) { background: #9f1239; }
+.btn-audit-export:disabled, .btn-audit-clear:disabled {
+  background: #e5e7eb !important;
+  color: #6b7280 !important;
+  border-color: #d1d5db !important;
+  box-shadow: none !important;
+}
+
+.filter-chip {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 
 .btn-block {
   width: 100%;
@@ -463,15 +514,39 @@ main {
 }
 .modal-card {
   background: var(--card);
-  width: 100%;
+  box-sizing: border-box;
+  width: calc(100% - 24px);
   max-width: 360px;
   border-radius: 20px;
   padding: 20px;
   box-shadow: var(--shadow);
 }
 .qty-modal { z-index: 250; }
+.qty-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  width: 100%;
+  min-width: 0;
+}
+.qty-step {
+  flex: 0 0 42px;
+  width: 42px;
+  min-width: 42px;
+  height: 46px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.35rem;
+  line-height: 1;
+}
 .qty-input {
-  flex: 1;
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  box-sizing: border-box;
   text-align: center;
   font-size: 1.5rem;
   font-weight: 800;
@@ -549,4 +624,63 @@ main {
 }
 select.search-input {
   appearance: auto;
+}
+
+/* Role selector: clear, accessible permission preview without changing existing layout rules. */
+.role-settings-panel {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(145deg, var(--card), var(--bg));
+}
+.role-settings-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.role-settings-heading strong { font-size: 1rem; }
+.role-settings-heading p,
+.role-preview-description {
+  margin: 5px 0 0;
+  color: var(--text-soft);
+  font-size: .82rem;
+  line-height: 1.7;
+}
+.role-current-pill {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  font-size: .78rem;
+  font-weight: 800;
+}
+.role-settings-panel .set-row { background: var(--card); }
+.role-preview-description {
+  padding: 8px 10px;
+  border-right: 3px solid var(--primary);
+  background: var(--primary-soft);
+  border-radius: 8px;
+}
+.role-permission-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 7px;
+  margin-top: 10px;
+}
+.role-permission-list span {
+  padding: 8px 9px;
+  border: 1px solid var(--border-light);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--text);
+  font-size: .78rem;
+  line-height: 1.5;
+}
+@media (max-width: 520px) {
+  .role-settings-panel { padding: 11px; }
+  .role-permission-list { grid-template-columns: 1fr; }
 }
